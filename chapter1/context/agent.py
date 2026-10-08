@@ -10,13 +10,13 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import requests
-from openai import OpenAI
-import pypdf
+from openai import OpenAI, omit
+from openai.lib.streaming.chat import ChatCompletionStreamState
+import PyPDF2
 from io import BytesIO
 import math
 from datetime import datetime
-
-from calc_sandbox import safe_eval
+from concurrent.futures import TimeoutError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -40,6 +40,22 @@ def _reasoning_safe_temperature(model, requested=1.0):
 HIDDEN_RESULT_MARKER = "[Tool result hidden due to context mode]"
 HIDDEN_RESULT_EMPTY = ""
 HIDDEN_RESULT_STYLES = {"marker": HIDDEN_RESULT_MARKER, "empty": HIDDEN_RESULT_EMPTY}
+
+
+def _assemble_streamed_completion(stream, tools=None):
+    """Fold a ``stream=True`` chat iterator into one ChatCompletion.
+
+    CodeBuddy (and similar stream-only backends) reject non-stream
+    requests. Callers still want ``choices[0].message`` after the turn,
+    so the chunks are accumulated here rather than changing the ReAct
+    loop to consume a stream.
+    """
+    state = ChatCompletionStreamState(
+        input_tools=tools if tools else omit,
+    )
+    for chunk in stream:
+        state.handle_chunk(chunk)
+    return state.get_final_completion()
 
 
 class ContextMode(Enum):
@@ -115,7 +131,7 @@ class ToolRegistry:
             
             # Parse the PDF content
             pdf_file = BytesIO(pdf_content)
-            pdf_reader = pypdf.PdfReader(pdf_file)
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
             
             text_content = []
             for page_num, page in enumerate(pdf_reader.pages, 1):
@@ -142,7 +158,7 @@ class ToolRegistry:
     @staticmethod
     def convert_currency(amount: float, from_currency: str, to_currency: str) -> Dict[str, Any]:
         """
-        Convert currency using static exchange rates
+        Convert currency using live exchange rates
         
         Args:
             amount: Amount to convert
@@ -262,14 +278,17 @@ class ToolRegistry:
         try:
             logger.info(f"Calculating: {expression}")
             
-            # Sanitize the syntax tree, not just the builtins dict: an empty
-            # __builtins__ still permits attribute access, so the old eval()
-            # sandbox was escapable via ().__class__ ... . The AST whitelist
-            # in calc_sandbox.py rejects those node shapes before the
-            # interpreter sees them. Keep the caret-to-power rewrite so
-            # existing prompts are unchanged.
+            # Sanitize expression - only allow safe mathematical operations
+            allowed_names = {
+                k: v for k, v in math.__dict__.items() if not k.startswith("__")
+            }
+            allowed_names.update({"abs": abs, "round": round, "min": min, "max": max})
+            
+            # Replace common operations for clarity
             expression = expression.replace("^", "**")
-            result = safe_eval(expression)
+            
+            # Evaluate the expression
+            result = eval(expression, {"__builtins__": {}}, allowed_names)
             
             return {
                 "expression": expression,
@@ -411,11 +430,17 @@ class ContextAwareAgent:
         # OPENROUTER_API_KEY is set, the request routes through OpenRouter with a
         # mapped model id. Behaviour is unchanged when the provider key is set.
         from config import resolve_backend
+        from agentbook.providers.registry import lookup
         backend = resolve_backend(self.provider, model=model, api_key=api_key)
         resolved_key = backend.api_key
         resolved_base_url = backend.base_url
         self.model = backend.model
         self.using_openrouter = backend.using_openrouter
+        # OpenRouter accepts non-stream chat, so the flag only applies
+        # when talking to the provider's own endpoint.
+        self.requires_stream = (
+            lookup(self.provider).requires_stream and not self.using_openrouter
+        )
         if self.using_openrouter:
             logger.info(
                 f"{self.provider} API key not set; routing via OpenRouter "
@@ -532,22 +557,39 @@ Important: When you have gathered all necessary information and computed the fin
         ]
     
     def _prepare_assistant_message(self, message) -> Dict[str, Any]:
+        """Build the assistant turn that is appended to the next request.
+
+        Stream-only backends (CodeBuddy) repeat ``delta.role`` on every
+        chunk; the OpenAI assembler concatenates that into
+        ``assistantassistant``. Dumping the raw model also keeps empty
+        ``function_call`` objects and extra tool-call fields, which
+        CodeBuddy then rejects as a broken tool sequence (error 11148).
+        Only the OpenAI-canonical fields go back on the wire.
         """
-        Prepare assistant message for adding to messages list, 
-        filtering out reasoning_content if in NO_REASONING mode
-        
-        Args:
-            message: The assistant message object
-            
-        Returns:
-            Dictionary representation of the message
-        """
-        msg_dict = message.dict() if hasattr(message, 'dict') else message.model_dump()
-        
-        # Remove reasoning_content if in NO_REASONING mode
-        if self.context_mode == ContextMode.NO_REASONING and 'reasoning_content' in msg_dict:
-            msg_dict.pop('reasoning_content')
-            
+        role = str(getattr(message, "role", None) or "assistant")
+        if "assistant" in role:
+            role = "assistant"
+        msg_dict = {
+            "role": role,
+            "content": getattr(message, "content", None),
+        }
+        tool_calls = getattr(message, "tool_calls", None)
+        if tool_calls:
+            msg_dict["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": getattr(tc, "type", None) or "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments or "",
+                    },
+                }
+                for tc in tool_calls
+            ]
+        if self.context_mode != ContextMode.NO_REASONING:
+            reasoning = self._reasoning_content(message)
+            if reasoning:
+                msg_dict["reasoning_content"] = reasoning
         return msg_dict
 
     @staticmethod
@@ -698,6 +740,16 @@ Important: When you have gathered all necessary information and computed the fin
             return None
         return content.split("FINAL ANSWER:", 1)[1].strip()
 
+    def _create_chat_completion(self, **create_kwargs):
+        """Send one chat turn, streaming when the backend requires it."""
+        if not self.requires_stream:
+            return self.client.chat.completions.create(**create_kwargs)
+        create_kwargs["stream"] = True
+        stream = self.client.chat.completions.create(**create_kwargs)
+        return _assemble_streamed_completion(
+            stream, tools=create_kwargs.get("tools"),
+        )
+
     def execute_task(self, task: str, max_iterations: Optional[int] = None) -> Dict[str, Any]:
         """
         Execute a task using available tools (ReAct loop).
@@ -786,7 +838,7 @@ Important: When you have gathered all necessary information and computed the fin
                 logger.info(f"Sending request to {self.provider} API")
 
                 # Call the model with tools
-                response = self.client.chat.completions.create(**create_kwargs)
+                response = self._create_chat_completion(**create_kwargs)
 
                 response_dict = (
                     response.model_dump() if hasattr(response, "model_dump")
@@ -902,12 +954,8 @@ Important: When you have gathered all necessary information and computed the fin
                 # Note: We do NOT modify the system prompt anymore.
                 # The context is already built into the conversation through tool history
                     
-            # The OpenAI SDK raises APITimeoutError (not the builtin
-            # TimeoutError) when the request exceeds the configured 180s
-            # timeout below; catch it explicitly so timeouts are reported
-            # as timeouts instead of falling through to the generic path.
-            except (openai.APITimeoutError, requests.exceptions.Timeout) as exc:
-                logger.error(f"Request timed out after 180 seconds: {exc}")
+            except TimeoutError:
+                logger.error("Request timed out after 60 seconds")
                 return {
                     "error": "Request timed out. The model is taking too long to respond. Try a simpler task or different provider.",
                     "trajectory": self.trajectory,

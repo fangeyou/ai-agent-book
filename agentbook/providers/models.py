@@ -38,6 +38,9 @@ class Provider:
             aggregator sharing OpenRouter's id format still has its own
             ``base_url`` and its own key, and is never routed through
             OpenRouter on that basis.
+        requires_stream: Whether the backend rejects non-stream chat
+            completions. Callers still receive a fully assembled response;
+            the flag only changes how the request is sent.
     """
 
     name: str
@@ -47,6 +50,7 @@ class Provider:
     base_url_var: str | None = None
     requires_key: bool = True
     namespaces_models: bool = False
+    requires_stream: bool = False
 
     def api_key(self) -> str:
         """Read this provider's API key from the environment.

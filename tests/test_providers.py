@@ -22,8 +22,6 @@ from agentbook.providers.registry import supported_providers
 from agentbook.providers.resolution import build_openrouter_backend
 
 PROVIDER_KEY_VARS = [
-    "ATLASCLOUD_API_KEY",
-    "ATLASCLOUD_BASE_URL",
     "DASHSCOPE_API_KEY",
     "DASHSCOPE_BASE_URL",
     "SILICONFLOW_API_KEY",
@@ -31,8 +29,9 @@ PROVIDER_KEY_VARS = [
     "MOONSHOT_API_KEY",
     "KIMI_API_KEY",
     "DEEPSEEK_API_KEY",
-    "KRILL_API_KEY",
     "ZHIPU_API_KEY",
+    "CODEBUDDY_API_KEY",
+    "CODEBUDDY_BASE_URL",
     "OPENAI_API_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
@@ -41,7 +40,6 @@ PROVIDER_KEY_VARS = [
     "OPENROUTER_MODEL",
     "OPENROUTER_BASE_URL",
     "DEEPSEEK_BASE_URL",
-    "KRILL_BASE_URL",
     "KIMI_BASE_URL",
     "OLLAMA_BASE_URL",
     "OPENAI_BASE_URL",
@@ -156,78 +154,22 @@ def test_dashscope_international_region_override(monkeypatch):
     assert backend.base_url == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
 
-def test_krill_key_uses_multi_model_gateway_directly(monkeypatch):
-    monkeypatch.setenv("KRILL_API_KEY", "test-krill-key")
-    backend = resolve_backend("krill")
-    assert backend.api_key == "test-krill-key"
-    assert backend.base_url == "https://api.krill-code.net/v1"
-    assert backend.model == "gpt-5.6-luna"
-    assert backend.provider == "krill"
+def test_codebuddy_key_uses_china_endpoint(monkeypatch):
+    monkeypatch.setenv("CODEBUDDY_API_KEY", "test-codebuddy-key")
+    backend = resolve_backend("codebuddy")
+    assert backend.api_key == "test-codebuddy-key"
+    assert backend.base_url == "https://copilot.tencent.com/v2"
+    assert backend.model == "auto"
+    assert backend.provider == "codebuddy"
     assert backend.using_openrouter is False
+    assert PROVIDERS["codebuddy"].requires_stream is True
 
 
-def test_krill_keeps_bare_model_ids(monkeypatch):
-    monkeypatch.setenv("KRILL_API_KEY", "test-krill-key")
-    backend = resolve_backend("krill", model="gemini-3.5-flash")
-    assert backend.model == "gemini-3.5-flash"
-
-
-def test_krill_base_url_override(monkeypatch):
-    monkeypatch.setenv("KRILL_API_KEY", "test-krill-key")
-    monkeypatch.setenv("KRILL_BASE_URL", "https://krill-gateway.example/v1")
-    assert resolve_backend("krill").base_url == "https://krill-gateway.example/v1"
-
-
-def test_atlascloud_key_uses_multi_model_gateway_directly(monkeypatch):
-    monkeypatch.setenv("ATLASCLOUD_API_KEY", "test-atlascloud-key")
-    backend = resolve_backend("atlascloud")
-    assert backend.api_key == "test-atlascloud-key"
-    assert backend.base_url == "https://api.atlascloud.ai/v1"
-    assert backend.model == "openai/gpt-4.1-mini"
-    assert backend.provider == "atlascloud"
-    assert backend.using_openrouter is False
-
-
-def test_atlascloud_namespaces_bare_model_ids(monkeypatch):
-    monkeypatch.setenv("ATLASCLOUD_API_KEY", "test-atlascloud-key")
-    assert resolve_backend("atlascloud", model="gpt-4o").model == "openai/gpt-4o"
-
-
-def test_atlascloud_base_url_override(monkeypatch):
-    monkeypatch.setenv("ATLASCLOUD_API_KEY", "test-atlascloud-key")
-    monkeypatch.setenv("ATLASCLOUD_BASE_URL", "https://atlas.example/v1")
-    assert resolve_backend("atlascloud").base_url == "https://atlas.example/v1"
-
-
-def test_explicit_krill_provider_is_not_hijacked_for_gpt5(monkeypatch):
-    monkeypatch.setenv("KRILL_API_KEY", "test-krill-key")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
-    backend = resolve_backend("krill", model="gpt-5.6-luna")
-    assert backend.api_key == "test-krill-key"
-    assert backend.base_url == "https://api.krill-code.net/v1"
-    assert backend.model == "gpt-5.6-luna"
-    assert backend.using_openrouter is False
-
-
-def test_default_krill_provider_is_rerouted_for_gpt5(monkeypatch):
-    monkeypatch.setenv("KRILL_API_KEY", "test-krill-key")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
-    backend = resolve_backend(
-        "krill", model="gpt-5.6-luna", chosen_by_reader=False
-    )
-    assert backend.api_key == "test-openrouter-key"
-    assert backend.base_url == "https://openrouter.ai/api/v1"
-    assert backend.model == "openai/gpt-5.6-luna"
-    assert backend.using_openrouter is True
-
-
-def test_krill_still_falls_back_when_its_key_is_missing(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
-    backend = resolve_backend("krill")
-    assert backend.api_key == "test-openrouter-key"
-    assert backend.base_url == "https://openrouter.ai/api/v1"
-    assert backend.model == "openai/gpt-5.6-luna"
-    assert backend.using_openrouter is True
+def test_codebuddy_international_region_override(monkeypatch):
+    monkeypatch.setenv("CODEBUDDY_API_KEY", "test-codebuddy-key")
+    monkeypatch.setenv("CODEBUDDY_BASE_URL", "https://www.codebuddy.ai/v2")
+    backend = resolve_backend("codebuddy")
+    assert backend.base_url == "https://www.codebuddy.ai/v2"
 
 
 def test_falls_back_to_openrouter_when_provider_key_missing(monkeypatch):
@@ -369,11 +311,10 @@ def test_supported_providers_covers_registry_and_aliases():
     for alias in ("moonshot", "ark", "google", "qwen", "bailian"):
         assert alias in SUPPORTED_PROVIDERS
     assert "dashscope" in SUPPORTED_PROVIDERS
+    assert "codebuddy" in SUPPORTED_PROVIDERS
     assert "ollama" in SUPPORTED_PROVIDERS
     assert "openai" in SUPPORTED_PROVIDERS
     assert "gemini" in SUPPORTED_PROVIDERS
-    assert "krill" in SUPPORTED_PROVIDERS
-    assert "atlascloud" in SUPPORTED_PROVIDERS
 
 
 def test_fallback_key_is_not_reusable_as_a_provider_key(monkeypatch):

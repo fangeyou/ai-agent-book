@@ -49,7 +49,7 @@ PROVIDERS: dict[str, Provider] = {
     "kimi": Provider(
         name="kimi",
         base_url="https://api.moonshot.cn/v1",
-        default_model="kimi-k3",
+        default_model="kimi-k2.7",
         # KIMI_API_KEY kept for backwards compatibility.
         key_vars=("MOONSHOT_API_KEY", "KIMI_API_KEY"),
         base_url_var="KIMI_BASE_URL",
@@ -69,21 +69,17 @@ PROVIDERS: dict[str, Provider] = {
         default_model="glm-5.2",
         key_vars=("ZHIPU_API_KEY",),
     ),
-    "krill": Provider(
-        name="krill",
-        base_url="https://api.krill-code.net/v1",
-        default_model="gpt-5.6-luna",
-        key_vars=("KRILL_API_KEY",),
-        base_url_var="KRILL_BASE_URL",
-    ),
-    "atlascloud": Provider(
-        name="atlascloud",
-        base_url="https://api.atlascloud.ai/v1",
-        default_model="openai/gpt-4.1-mini",
-        key_vars=("ATLASCLOUD_API_KEY",),
-        base_url_var="ATLASCLOUD_BASE_URL",
-        # Atlas Cloud serves models from multiple vendors under namespaced ids.
-        namespaces_models=True,
+    "codebuddy": Provider(
+        name="codebuddy",
+        # Tencent CodeBuddy keys are region-bound. Default to the China
+        # endpoint; readers using an international-region key can set
+        # CODEBUDDY_BASE_URL to https://www.codebuddy.ai/v2.
+        base_url="https://copilot.tencent.com/v2",
+        default_model="auto",
+        key_vars=("CODEBUDDY_API_KEY",),
+        base_url_var="CODEBUDDY_BASE_URL",
+        # The /v2 chat endpoint returns 11101 unless stream=true.
+        requires_stream=True,
     ),
     "openrouter": Provider(
         name="openrouter",
